@@ -10,7 +10,7 @@
 
     // This is a [Semantic Version](https://semver.org/).
     // In a future version of Zig it will be used for package deduplication.
-    .version = "0.0.0",
+    .version = "0.0.1",
 
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
@@ -52,8 +52,8 @@
         //    .lazy = false,
         //},
         .zigglgen = .{
-            .url = "git+https://github.com/castholm/zigglgen#5e9e161202e3db77094bd237538a1c6f0cd353f6",
-            .hash = "1220bb9525c0017b47826ec2a7263face70b33961efb3134d5df936e083cb8f608d3",
+            .url = "git+https://github.com/castholm/zigglgen#701f41808086411f14d3bc2d87fc0b14bd09ceba",
+            .hash = "1220acff2285b51630055c7c062fb62a01b32272297b27e90cd6f85901c1b4d1c48d",
         },
     },
 

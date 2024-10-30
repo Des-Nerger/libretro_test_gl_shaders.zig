@@ -337,7 +337,7 @@ fn initHwContext() bool {
         if (gl.info.api == .gles) .{
             .context_type = c.RETRO_HW_CONTEXT_OPENGLES2,
         } else .{
-            .context_type = c.RETRO_HW_CONTEXT_OPENGL_CORE,
+            .context_type = c.RETRO_HW_CONTEXT_OPENGL,
             .version_major = 2,
             .version_minor = 0,
         },
