@@ -1,3 +1,4 @@
+const ArrayList = std.ArrayList;
 const assert = debug.assert;
 const c = @cImport({
     @cInclude("libretro-common/libretro.h");
@@ -5,6 +6,8 @@ const c = @cImport({
 const debug = std.debug;
 const fmt = std.fmt;
 const gl = @import("gl");
+const heap = std.heap;
+const log = std.log;
 const mem = std.mem;
 const meta = struct {
     fn UnwrapOptional(optional: type) type {
@@ -21,13 +24,42 @@ const meta = struct {
     usingnamespace std.meta;
 };
 const std = @import("std");
+pub const std_options = std.Options{
+    .logFn = struct {
+        fn logFn(
+            comptime level: log.Level,
+            comptime scope: @Type(.enum_literal),
+            comptime format: []const u8,
+            args: anytype,
+        ) void {
+            _ = scope;
+            const level_suffix = switch (level) {
+                .debug => "DEBUG",
+                .err => "ERROR",
+                .info => "INFO",
+                .warn => "WARN",
+            };
+            if (o.cb.maybe_log) |log_cb| {
+                var msg = ArrayList(u8).init(o.arena.allocator());
+                msg.writer().print(format ++ "\n\x00", args) catch unreachable;
+                log_cb(@field(c, "RETRO_LOG_" ++ level_suffix), msg.items.ptr);
+            } else debug.print("[libretro " ++ level_suffix ++ "] " ++ format ++ "\n", args);
+        }
+    }.logFn,
+};
 
 const base_width = 320;
 const base_height = 240;
 const max_width = 1024;
 const max_height = 1024;
 
+fn resetArena() void {
+    if (!o.arena.reset(.retain_capacity))
+        log.info("ArenaAllocator pre-heating failed: no big deal", .{});
+}
+
 const o = struct { // c-re
+    var arena = heap.ArenaAllocator.init(heap.page_allocator);
     var hw_render: c.retro_hw_render_callback = undefined;
 
     var width: gl.sizei = base_width;
@@ -48,22 +80,13 @@ const o = struct { // c-re
         var env: meta.UnwrapOptional(c.retro_environment_t) = undefined;
         var input_poll: meta.UnwrapOptional(c.retro_input_poll_t) = undefined;
         var input_state: meta.UnwrapOptional(c.retro_input_state_t) = undefined;
+        var maybe_log: c.retro_log_printf_t = null;
     };
 
     var frame_count: u16 = 0;
 };
 
-const shader_source_preamble = if (gl.info.api == .gles)
-    \\#version 100
-    \\precision mediump float;
-    \\
-else
-    \\#version 110
-    \\
-    ;
-
 const vertex_shader =
-    shader_source_preamble ++
     \\uniform mat4 u_mvp;
     \\attribute vec2 a_vertex;
     \\attribute vec4 a_color;
@@ -75,7 +98,6 @@ const vertex_shader =
 ;
 
 const fragment_shader =
-    shader_source_preamble ++
     \\varying vec4 v_color;
     \\void main() {
     \\    gl_FragColor = v_color;
@@ -85,15 +107,28 @@ const fragment_shader =
 fn compileProgram() void {
     o.prog = gl.CreateProgram();
 
+    const shader_preamble: [*:0]const u8 = switch (o.hw_render.context_type) {
+        c.RETRO_HW_CONTEXT_OPENGL =>
+        \\#version 110
+        \\
+        ,
+        c.RETRO_HW_CONTEXT_OPENGLES2 =>
+        \\#version 100
+        \\precision mediump float;
+        \\
+        ,
+        else => unreachable,
+    };
+
     const vert = gl.CreateShader(gl.VERTEX_SHADER);
     defer gl.DeleteShader(vert);
-    gl.ShaderSource(vert, 1, &.{vertex_shader}, null);
+    gl.ShaderSource(vert, 2, &.{ shader_preamble, vertex_shader }, null);
     gl.CompileShader(vert);
     gl.AttachShader(o.prog, vert);
 
     const frag = gl.CreateShader(gl.FRAGMENT_SHADER);
     defer gl.DeleteShader(frag);
-    gl.ShaderSource(frag, 1, &.{fragment_shader}, null);
+    gl.ShaderSource(frag, 2, &.{ shader_preamble, fragment_shader }, null);
     gl.CompileShader(frag);
     gl.AttachShader(o.prog, frag);
 
@@ -143,9 +178,18 @@ comptime {
     }
 }
 
-pub fn retro_init() callconv(.C) void {}
+pub fn retro_init() callconv(.C) void {
+    if (o.arena.queryCapacity() == 0) {
+        _ = o.arena.allocator().alloc(u8, 64 * 1024) catch unreachable;
+        resetArena();
+    }
+}
 
-pub fn retro_deinit() callconv(.C) void {}
+pub fn retro_deinit() callconv(.C) void {
+    log.info("{s}: ArenaAllocator will deinit {} bytes", .{ @src().fn_name, o.arena.queryCapacity() });
+    assert(true == o.arena.reset(.free_all));
+    log.info("{s}: now it's {} bytes", .{ @src().fn_name, o.arena.queryCapacity() });
+}
 
 pub fn retro_api_version() callconv(.C) c_uint {
     return c.RETRO_API_VERSION;
@@ -181,6 +225,14 @@ pub fn retro_get_system_av_info(info: [*c]c.retro_system_av_info) callconv(.C) v
 
 pub fn retro_set_environment(cb: c.retro_environment_t) callconv(.C) void {
     o.cb.env = cb.?;
+    _ = o.cb.env(
+        c.RETRO_ENVIRONMENT_GET_LOG_INTERFACE,
+        comptime dest: {
+            const P, const field_name = .{ c.retro_log_callback, "log" }; // -arent, _
+            assert(@bitSizeOf(P) == @bitSizeOf(@FieldType(P, field_name)));
+            break :dest @as(*P, @fieldParentPtr(field_name, &o.cb.maybe_log));
+        },
+    );
     {
         var no_rom = true;
         _ = o.cb.env(c.RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_rom);
@@ -225,12 +277,14 @@ fn updateVariables() void {
         inline for (.{ &o.width, &o.height }) |dim| {
             dim.* = fmt.parseUnsigned(@TypeOf(dim.*), dims.next().?, 10) catch unreachable;
         }
-        debug.assert(dims.next() == null);
-        debug.print("[libretro-test]: Got size: {} x {}.\n", .{ o.width, o.height });
+        assert(null == dims.next());
+        log.info("Got size: {} x {}.", .{ o.width, o.height });
     }
 }
 
 pub fn retro_run() callconv(.C) void {
+    defer resetArena();
+
     {
         var is_updated: bool = undefined;
         if (o.cb.env(c.RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &is_updated) and is_updated)
@@ -302,7 +356,7 @@ pub fn retro_run() callconv(.C) void {
 }
 
 fn contextReset() callconv(.C) void {
-    debug.print("Context reset!\n", .{});
+    log.info("Context reset!", .{});
     const gl_procs = &(struct {
         var gl_procs: gl.ProcTable = undefined;
     }.gl_procs);
@@ -314,7 +368,7 @@ fn contextReset() callconv(.C) void {
 }
 
 fn contextDestroy() callconv(.C) void {
-    debug.print("Context destroy!\n", .{});
+    log.info("Context destroy!", .{});
 
     gl.DeleteBuffers(1, @as(*[1]gl.uint, &o.vbo));
     o.vbo = undefined;
@@ -326,23 +380,29 @@ fn contextDestroy() callconv(.C) void {
 }
 
 fn initHwContext() bool {
-    o.hw_render = meta.updateStruct(
-        c.retro_hw_render_callback{
-            .context_reset = &contextReset,
-            .context_destroy = &contextDestroy,
-            .depth = true,
-            .stencil = true,
-            .bottom_left_origin = true,
-        },
-        if (gl.info.api == .gles) .{
-            .context_type = c.RETRO_HW_CONTEXT_OPENGLES2,
-        } else .{
-            .context_type = c.RETRO_HW_CONTEXT_OPENGL,
-            .version_major = 2,
-            .version_minor = 0,
-        },
-    );
-    return o.cb.env(c.RETRO_ENVIRONMENT_SET_HW_RENDER, &o.hw_render);
+    o.hw_render = .{
+        .context_reset = &contextReset,
+        .context_destroy = &contextDestroy,
+        .depth = true,
+        .stencil = true,
+        .bottom_left_origin = true,
+        .context_type = c.RETRO_HW_CONTEXT_OPENGLES2,
+    };
+    var i: u1, var result: bool = .{ 0, undefined };
+    while (true) : (i +%= 1) {
+        result = o.cb.env(c.RETRO_ENVIRONMENT_SET_HW_RENDER, &o.hw_render);
+        if (result or i == 1)
+            return result;
+        log.warn("GLES isn't supported, trying desktop GL...", .{});
+        o.hw_render = meta.updateStruct(
+            o.hw_render,
+            .{
+                .context_type = c.RETRO_HW_CONTEXT_OPENGL,
+                .version_major = 2,
+                .version_minor = 0,
+            },
+        );
+    }
 }
 
 pub fn retro_load_game(info: [*c]const c.retro_game_info) callconv(.C) bool {
@@ -352,17 +412,17 @@ pub fn retro_load_game(info: [*c]const c.retro_game_info) callconv(.C) bool {
         const pix_fmt_name = "RETRO_PIXEL_FORMAT_XRGB8888";
         var pix_fmt = @field(c, pix_fmt_name);
         if (!o.cb.env(c.RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pix_fmt)) {
-            debug.print(pix_fmt_name ++ " is not supported.\n", .{});
+            log.err(pix_fmt_name ++ " is not supported.", .{});
             return false;
         }
     }
 
     if (!initHwContext()) {
-        debug.print("HW Context could not be initialized, exiting...\n", .{});
+        log.err("HW Context could not be initialized, exiting...", .{});
         return false;
     }
 
-    debug.print("Loaded game!\n", .{});
+    log.info("Loaded game!", .{});
     _ = info;
     return true;
 }

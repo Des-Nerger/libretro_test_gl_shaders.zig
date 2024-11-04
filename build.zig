@@ -26,23 +26,10 @@ pub fn build(b: *std.Build) !void {
     });
     lib.addIncludePath(b.path("include"));
 
-    const use_gles = b.option(
-        bool,
-        "gles",
-        "Target GL ES 2.0 instead of GL 2.0",
-    ) orelse false;
-
     // Choose the OpenGL API, version, profile and extensions you want to generate bindings for.
     const gl_bindings = zigglgen.generateBindingsModule(
         b,
-        o: { // -ptions
-            var o = zigglgen.GeneratorOptions{ .api = .gles, .version = .@"2.0" };
-            if (!use_gles) {
-                o.api = .gl;
-                o.extensions = &.{.ARB_framebuffer_object};
-            }
-            break :o o;
-        },
+        zigglgen.GeneratorOptions{ .api = .gles, .version = .@"2.0" },
     );
 
     // Import the generated module.
@@ -55,7 +42,10 @@ pub fn build(b: *std.Build) !void {
         lib,
         .{
             .dest_dir = .{
-                .override = if (target.query.isNative())
+                .override = if (any_native: {
+                    const q = target.query;
+                    break :any_native q.isNativeCpu() or q.isNativeOs() or q.isNativeAbi();
+                })
                     .prefix
                 else
                     .{ .custom = try target.query.zigTriple(b.allocator) },
