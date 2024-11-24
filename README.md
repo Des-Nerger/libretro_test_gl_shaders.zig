@@ -10,13 +10,21 @@ On mobile      - A graphics card driver supporting OpenGL ES 2.0 and/or higher.
 Zig
 
 ## Building
+#### Desktop
 To compile, you will need a Zig compiler and assorted toolchain installed.
 
-    $ zig build --release
+    $ zig build --release=safe
 
 This targets [libretro](http://libretro.com) GL interface, so you need a libretro frontend supporting this interface, such as [RetroArch](https://github.com/libretro/RetroArch), installed.
 
+#### Android AArch64
+
+    $ zig build --release=fast -Dtarget=aarch64-linux-android
+
+The Android NDK isn't required; at least not with the fast optimize mode.
+
 ## Running
+#### Desktop
 After building, this command should run the program:
 
     $ retroarch -L zig-out/*retro_test_gl_shaders.*
