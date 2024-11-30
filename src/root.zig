@@ -50,8 +50,10 @@ pub const std_options = std.Options{
 
 const base_width = 320;
 const base_height = 240;
+const fps = 60.0;
 const max_width = 1024;
 const max_height = 1024;
+const sample_rate = @round(8000.0 / fps) * fps;
 
 fn resetArena() void {
     if (!o.arena.reset(.retain_capacity))
@@ -159,7 +161,7 @@ fn setupVbo() void {
     gl.UseProgram(o.prog);
     defer gl.UseProgram(0);
 
-    gl.GenBuffers(1, @as(*[1]gl.uint, &o.vbo));
+    gl.GenBuffers(1, @as(*[1]@TypeOf(o.vbo), &o.vbo));
     gl.BindBuffer(gl.ARRAY_BUFFER, o.vbo);
     defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
 
@@ -196,7 +198,7 @@ pub fn retro_api_version() callconv(.C) c_uint {
 }
 
 pub fn retro_set_controller_port_device(port: c_uint, device: c_uint) callconv(.C) void {
-    _, _ = .{ port, device };
+    _ = .{ port, device };
 }
 
 pub fn retro_get_system_info(info: [*c]c.retro_system_info) callconv(.C) void {
@@ -210,15 +212,14 @@ pub fn retro_get_system_info(info: [*c]c.retro_system_info) callconv(.C) void {
 pub fn retro_get_system_av_info(info: [*c]c.retro_system_av_info) callconv(.C) void {
     info.* = .{
         .timing = .{
-            .fps = 60.0,
-            .sample_rate = 0.0,
+            .fps = fps,
+            .sample_rate = sample_rate,
         },
         .geometry = .{
             .base_width = base_width,
             .base_height = base_height,
             .max_width = max_width,
             .max_height = max_height,
-            .aspect_ratio = 4.0 / 3.0,
         },
     };
 }
@@ -353,6 +354,13 @@ pub fn retro_run() callconv(.C) void {
     o.frame_count +%= 1;
 
     o.cb.video(c.RETRO_HW_FRAME_BUFFER_VALID, @intCast(o.width), @intCast(o.height), 0);
+    {
+        comptime assert(0 == sample_rate % fps);
+        const num_audio_frames = sample_rate / fps;
+        const num_audio_channels = 2; // stereo
+        const silence_samples = &[_]i16{0} ** (num_audio_frames * num_audio_channels);
+        assert(num_audio_frames == o.cb.audio_batch(silence_samples, num_audio_frames));
+    }
 }
 
 fn contextReset() callconv(.C) void {
@@ -370,7 +378,7 @@ fn contextReset() callconv(.C) void {
 fn contextDestroy() callconv(.C) void {
     log.info("Context destroy!", .{});
 
-    gl.DeleteBuffers(1, @as(*[1]gl.uint, &o.vbo));
+    gl.DeleteBuffers(1, @as(*[1]@TypeOf(o.vbo), &o.vbo));
     o.vbo = undefined;
 
     gl.DeleteProgram(o.prog);
@@ -399,7 +407,6 @@ fn initHwContext() bool {
             .{
                 .context_type = c.RETRO_HW_CONTEXT_OPENGL,
                 .version_major = 2,
-                .version_minor = 0,
             },
         );
     }
@@ -438,7 +445,7 @@ pub fn retro_load_game_special(
     info: [*c]const c.struct_retro_game_info,
     num_info: usize,
 ) callconv(.C) bool {
-    _, _, _ = .{ game_type, info, num_info };
+    _ = .{ game_type, info, num_info };
     return false;
 }
 
@@ -471,5 +478,5 @@ pub fn retro_reset() callconv(.C) void {}
 pub fn retro_cheat_reset() callconv(.C) void {}
 
 pub fn retro_cheat_set(index: c_uint, enabled: bool, code: [*c]const u8) callconv(.C) void {
-    _, _, _ = .{ index, enabled, code };
+    _ = .{ index, enabled, code };
 }
